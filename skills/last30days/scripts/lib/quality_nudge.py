@@ -75,7 +75,9 @@ def _x_error_prescription(config: dict, research_results: dict) -> prescriptions
     backend_error = message.removeprefix("Simplified-query retry failed: ")
     backend_error = backend_error.removeprefix("All X backends failed — ")
     if backend_error.startswith("X served via "):
-        backend_error = backend_error.partition(" after ")[2] or backend_error
+        served_backend, separator, origin_error = backend_error.removeprefix("X served via ").partition(" after ")
+        if separator:
+            backend_error = origin_error.split(f"; {served_backend}", 1)[0]
     if backend_error.startswith("xai:"):
         state = http.classify_failure(message=backend_error)
         if state == health.PAYMENT_REQUIRED:

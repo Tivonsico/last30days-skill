@@ -1114,7 +1114,11 @@ class TestXaiErrorRemediation:
         assert "x" in q["core_degraded"]
         assert "rate limit" in q["nudge_text"]
 
-    def test_rate_limited_backup_stops_later_x_subqueries(self):
+    @pytest.mark.parametrize("xai_status,expected_state,expected_fix", [
+        (429, "ok", "rate limit"),
+        (403, "auth-failed", "console.x.ai"),
+    ])
+    def test_rate_limited_backup_stops_later_x_subqueries(self, xai_status, expected_state, expected_fix):
         import last30days as cli
         from lib import http, pipeline, providers, schema, xai_x, xquik
 
@@ -1136,10 +1140,15 @@ class TestXaiErrorRemediation:
                 }]}
             http._raise(http.HTTPError("Too many requests", status_code=429))
 
+        def rejected_xai_response(*args, **kwargs):
+            message = "Forbidden" if xai_status == 403 else "Quota blocked"
+            http._raise(http.HTTPError(message, status_code=xai_status))
+
         with patch.object(providers, "resolve_runtime", return_value=(runtime, None)), \
              patch.object(pipeline, "_inner_max_workers", return_value=1), \
-             patch.object(xai_x, "search_x", side_effect=http.HTTPError("Quota blocked", status_code=429)) as xai_search, \
+             patch.object(xai_x, "search_x", wraps=xai_x.search_x) as xai_search, \
              patch.object(xquik, "search_xquik", wraps=xquik.search_xquik) as fallback_search, \
+             patch.object(http, "post", side_effect=rejected_xai_response) as xai_post, \
              patch.object(http, "get", side_effect=partial_xquik_response):
             report = pipeline.run(
                 topic=topic, config=config, depth="default", mock=False,
@@ -1158,11 +1167,16 @@ class TestXaiErrorRemediation:
             )
 
         assert xai_search.call_count == 1
+        assert xai_post.call_count == 1
         assert fallback_search.call_count == 1
         assert report.items_by_source["x"]
+        assert report.source_status["x"].state == expected_state
         assert report.source_status["x"].lane_failure_state == schema.RATE_LIMITED
+        assert "xquik also rate-limited" in report.source_status["x"].detail
+        assert f"xai: HTTP {xai_status}" in report.source_status["x"].detail
         results = cli._quality_research_results(
             report, {"available_sources": ["x"]}, {"attempts": 0, "failures": 0}
         )
         q = _compute(config_overrides=config, result_overrides=results, ytdlp_installed=True)
-        assert "rate limit" in q["nudge_text"]
+        assert expected_fix in q["nudge_text"]
+        assert "log into x.com" not in q["nudge_text"]

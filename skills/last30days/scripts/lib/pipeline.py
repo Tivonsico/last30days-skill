@@ -5464,15 +5464,27 @@ def _retrieve_stream_impl(
                     # Preserve a prior auth failure even when the backup served
                     # items. Session backends alone need re-login guidance.
                     prior_state = last_state
+                    backup_rate_limited = err_state == health.RATE_LIMITED or any(
+                        failure.outcome_state == health.RATE_LIMITED for failure in backend_failures
+                    )
+                    detail = f"X served via {backend} after {last_error}"
+                    if err:
+                        detail += f"; {backend}: {err}"
+                    if backup_rate_limited and err_state != health.RATE_LIMITED:
+                        detail += f"; {backend} also rate-limited"
                     if prior_state == schema.AUTH_FAILED:
                         repair = (
                             "; re-login needed for primary backend"
                             if last_error.startswith(("grok:", "bird:")) else ""
                         )
-                        return items, _outcome_artifact(
+                        artifact = _outcome_artifact(
                             schema.AUTH_FAILED,
-                            f"X served via {backend} after {last_error}{repair}",
+                            f"{detail}{repair}",
                         )
+                        if backup_rate_limited:
+                            artifact["_source_outcome_detail"] = f"{backend} also rate-limited"
+                            artifact["_source_outcome_detail_state"] = health.RATE_LIMITED
+                        return items, artifact
                     # Prior error was non-auth. Check if *current* backend also
                     # reported an error (e.g., grok returned items + revocation).
                     if err:
@@ -5483,14 +5495,6 @@ def _retrieve_stream_impl(
                                 schema.AUTH_FAILED,
                                 f"X served {len(items)} items via {backend} but also errored: {err}{repair}",
                             )
-                    backup_rate_limited = err_state == health.RATE_LIMITED or any(
-                        failure.outcome_state == health.RATE_LIMITED for failure in backend_failures
-                    )
-                    detail = f"X served via {backend} after {last_error}"
-                    if err:
-                        detail += f"; {backend}: {err}"
-                    elif backup_rate_limited:
-                        detail += f"; {backend} also rate-limited"
                     return items, {
                         "_source_outcome_detail": detail,
                         "_source_outcome_detail_state": health.RATE_LIMITED if backup_rate_limited else prior_state,
