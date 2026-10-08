@@ -2430,6 +2430,7 @@ def run(
         print("[Planner]   (no subqueries in plan)", file=sys.stderr)
 
     bundle = schema.RetrievalBundle(artifacts={"grounding": []})
+    deferred_retryable_failures: dict[str, dict[str, Any]] = {}
     if envelope is not None:
         # The footer names the X provenance (render._render_stats).
         bundle.artifacts["x_provenance"] = envelope.provenance
@@ -2777,12 +2778,19 @@ def run(
             if isinstance(artifact, dict) and artifact.get("_source_outcome"):
                 artifact = dict(artifact)
                 outcome_note = artifact.pop("_source_outcome")
-                bundle.record_failure(
-                    source,
-                    outcome_note["state"],
-                    outcome_note["detail"],
-                    attempted=outcome_note.get("attempted", True),
-                )
+                if (
+                    source == "youtube"
+                    and not raw_items
+                    and _retryable_youtube_outcome(outcome_note)
+                ):
+                    deferred_retryable_failures.setdefault(source, outcome_note)
+                else:
+                    bundle.record_failure(
+                        source,
+                        outcome_note["state"],
+                        outcome_note["detail"],
+                        attempted=outcome_note.get("attempted", True),
+                    )
             if isinstance(artifact, dict) and artifact.get("_source_outcome_detail"):
                 artifact = dict(artifact)
                 lane_state = artifact.pop("_source_outcome_detail_state", None)
@@ -2818,6 +2826,19 @@ def run(
                     source, normalized, stream_limit, topic,
                     host_fetched_x=host_fetched_x, protected_authors=explicit_first_party,
                 )
+            if isinstance(artifact, dict) and artifact.get("_source_outcome_if_empty"):
+                artifact = dict(artifact)
+                deferred_outcome = artifact.pop("_source_outcome_if_empty")
+                if not normalized:
+                    if _retryable_youtube_outcome(deferred_outcome):
+                        deferred_retryable_failures.setdefault(source, deferred_outcome)
+                    else:
+                        bundle.record_failure(
+                            source,
+                            deferred_outcome["state"],
+                            deferred_outcome["detail"],
+                            attempted=deferred_outcome.get("attempted", True),
+                        )
             bundle.add_items(subquery.label, source, normalized)
             if artifact:
                 bundle.artifacts.setdefault("grounding", []).append(artifact)
@@ -2847,6 +2868,10 @@ def run(
     _github_skip_retry = {"corpus"}
     if _github_person_done or _github_custom_done:
         _github_skip_retry.add("github")
+    pre_retry_counts = {
+        source: len(bundle.items_by_source.get(source, []))
+        for source in deferred_retryable_failures
+    }
     _retry_thin_sources(
         topic=topic,
         bundle=bundle,
@@ -2869,6 +2894,16 @@ def run(
         first_party_by_source=creator_first_party,
         run_started=run_started,
     )
+    for source, outcome in deferred_retryable_failures.items():
+        if (
+            source in bundle.errors_by_source
+            or len(bundle.items_by_source.get(source, [])) > pre_retry_counts[source]
+        ):
+            continue
+        bundle.record_failure(
+            source, outcome["state"], outcome["detail"],
+            attempted=outcome.get("attempted", True),
+        )
 
     # Reclassify partial failures as DEGRADED instead of silently dropping them.
     # A source that 429'd on one subquery but succeeded on another is not a hard
@@ -4057,6 +4092,15 @@ def _is_transient_error(exc: Exception) -> bool:
     return _mentions_status(str(exc), r"5\d\d", _SERVER_ERROR_PHRASES)
 
 
+def _retryable_youtube_outcome(outcome: dict[str, Any]) -> bool:
+    state = outcome.get("state")
+    if state in (health.TIMEOUT, health.UNREACHABLE):
+        return True
+    return state == health.ERROR and _is_transient_error(
+        SourceRunError(str(outcome.get("detail") or ""))
+    )
+
+
 def _topic_handle_mentions(topic: str) -> set[str]:
     """@mentions in the topic, which are real X handles.
 
@@ -4755,6 +4799,8 @@ def _retry_thin_sources(
         normalized = _apply_reddit_stream_keepers(
             source, normalized, settings["per_stream_limit"], topic
         )
+        if not normalized and isinstance(artifact, dict):
+            outcome_note = outcome_note or artifact.get("_source_outcome_if_empty")
         return source, normalized, outcome_note, (detail_note, detail_state)
 
     retryable = [s for s in thin_sources if s not in rate_limited_sources]
@@ -5564,6 +5610,7 @@ def _retrieve_stream_impl(
         yt_query = raw_topic or subquery.search_query
         result = None
         youtube_failure: str | None = None
+        recovered_failure: str | None = None
         # ScrapeCreators key (when present) is the default-on backup tier: it
         # powers the per-video transcript fallback, the SC search fallback, and
         # comment enrichment. None when no key, which keeps everything keyless.
@@ -5590,6 +5637,9 @@ def _retrieve_stream_impl(
                 )
                 if result.get("error"):
                     youtube_failure = str(result["error"])
+                elif result.get("items") and youtube_failure:
+                    recovered_failure = youtube_failure
+                    youtube_failure = None
             except Exception as exc:
                 youtube_failure = str(exc)
                 result = None
@@ -5605,6 +5655,14 @@ def _retrieve_stream_impl(
             state = youtube_yt.classify_run_failure(youtube_failure)
             attempted = state != schema.SKIPPED_UNCONFIGURED
             return items, _outcome_artifact(state, youtube_failure, attempted=attempted)
+        if recovered_failure:
+            state = youtube_yt.classify_run_failure(recovered_failure)
+            attempted = state != schema.SKIPPED_UNCONFIGURED
+            return items, {
+                "_source_outcome_if_empty": _outcome_artifact(
+                    state, recovered_failure, attempted=attempted,
+                )["_source_outcome"]
+            }
         return items, {}
     if source == "tiktok":
         # Use raw_topic so expand_tiktok_queries() generates diverse variants
