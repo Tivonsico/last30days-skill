@@ -893,3 +893,98 @@ class TestXaiErrorRemediation:
         q = _compute(config_overrides=config, result_overrides={"x_error": bundle.errors_by_source["x"]}, ytdlp_installed=True)
         assert expected in q["nudge_text"]
         assert unexpected not in q["nudge_text"]
+
+    @pytest.mark.parametrize("status,message,expected_state,expected_fix", [
+        (403, "Forbidden", "auth-failed", "console.x.ai"),
+        (402, "Quota blocked", "payment-required", "billing"),
+        (429, "Quota blocked", "rate-limited", "rate limit"),
+        (None, "Request deadline exceeded", "timeout", "timed out"),
+    ])
+    def test_raised_xai_error_from_thin_retry_keeps_cause(self, status, message, expected_state, expected_fix):
+        from lib import http, pipeline, schema, xai_x
+
+        config = _base_config(XAI_API_KEY="dummy-xai-key")
+        config["LAST30DAYS_X_BACKEND"] = "xai"
+        plan = schema.QueryPlan(
+            intent="breaking_news",
+            freshness_mode="strict_recent",
+            cluster_mode="story",
+            raw_topic="OpenClaw",
+            subqueries=[schema.SubQuery("primary", "OpenClaw", "Recent OpenClaw news", ["x"])],
+            source_weights={"x": 1.0},
+        )
+        bundle = schema.RetrievalBundle()
+        runtime = schema.ProviderRuntime("local", "", "", "xai")
+        error = http.DeadlineExceeded() if status is None else http.HTTPError(message, status_code=status)
+
+        with patch.object(xai_x, "search_x", side_effect=error):
+            pipeline._retry_thin_sources(
+                topic="OpenClaw",
+                bundle=bundle,
+                plan=plan,
+                config=config,
+                depth="default",
+                date_range=("2026-09-01", "2026-09-30"),
+                runtime=runtime,
+                mock=False,
+                rate_limited_sources=set(),
+                rate_limit_lock=threading.Lock(),
+                settings=pipeline.DEPTH_SETTINGS["default"],
+            )
+
+        assert bundle.errors_by_source["x"].startswith("Simplified-query retry failed: All X backends failed — xai:")
+        assert bundle.source_status["x"].state == expected_state
+        q = _compute(
+            config_overrides=config,
+            result_overrides={"x_error": bundle.errors_by_source["x"]},
+            ytdlp_installed=True,
+        )
+        assert expected_fix in q["nudge_text"]
+        assert "log into x.com" not in q["nudge_text"]
+
+    def test_raised_xai_auth_error_still_uses_xquik_fallback(self):
+        from lib import http, pipeline, schema, xai_x, xquik
+
+        config = _base_config(XAI_API_KEY="dummy-xai-key", XQUIK_API_KEY="dummy-xquik-key")
+        plan = schema.QueryPlan(
+            intent="breaking_news",
+            freshness_mode="strict_recent",
+            cluster_mode="story",
+            raw_topic="OpenClaw",
+            subqueries=[schema.SubQuery("primary", "OpenClaw", "Recent OpenClaw news", ["x"])],
+            source_weights={"x": 1.0},
+        )
+        bundle = schema.RetrievalBundle()
+        runtime = schema.ProviderRuntime("local", "", "", "xai")
+        fallback_item = {
+            "text": "Recent OpenClaw update",
+            "url": "https://x.com/example/status/1234567890123456789",
+            "author_handle": "example",
+            "date": "2026-09-15",
+            "engagement": {"likes": 2},
+            "relevance": 0.9,
+        }
+
+        with patch.object(xai_x, "search_x", side_effect=http.HTTPError("Forbidden", status_code=403)), \
+             patch.object(xquik, "search_xquik", return_value={"items": []}) as fallback_search, \
+             patch.object(xquik, "parse_xquik_response", return_value=[fallback_item]):
+            pipeline._retry_thin_sources(
+                topic="OpenClaw",
+                bundle=bundle,
+                plan=plan,
+                config=config,
+                depth="default",
+                date_range=("2026-09-01", "2026-09-30"),
+                runtime=runtime,
+                mock=False,
+                rate_limited_sources=set(),
+                rate_limit_lock=threading.Lock(),
+                settings=pipeline.DEPTH_SETTINGS["default"],
+            )
+
+        fallback_search.assert_called_once()
+        assert bundle.items_by_source["x"]
+        assert bundle.errors_by_source["x"].startswith("X served via xquik after xai:")
+        q = _compute(config_overrides=config, result_overrides={"x_error": bundle.errors_by_source["x"]}, ytdlp_installed=True)
+        assert "console.x.ai" in q["nudge_text"]
+        assert "log into x.com" not in q["nudge_text"]

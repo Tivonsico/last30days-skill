@@ -74,8 +74,21 @@ def _x_error_prescription(config: dict, research_results: dict) -> prescriptions
         return prescriptions.for_x(config, "connector_missing")
     backend_error = message.removeprefix("Simplified-query retry failed: ")
     backend_error = backend_error.removeprefix("All X backends failed — ")
+    if backend_error.startswith("X served via "):
+        backend_error = backend_error.partition(" after ")[2] or backend_error
     if backend_error.startswith("xai:"):
-        return prescriptions.for_x(config, "xai_error")
+        state = http.classify_failure(message=backend_error)
+        if state == health.PAYMENT_REQUIRED:
+            failure = "xai_payment_required"
+        elif state == health.RATE_LIMITED:
+            failure = "xai_rate_limited"
+        elif state == health.TIMEOUT:
+            failure = "xai_timeout"
+        elif state == health.AUTH_FAILED or "model" in backend_error.lower():
+            failure = "xai_error"
+        else:
+            failure = "xai_unavailable"
+        return prescriptions.for_x(config, failure)
     failure = "cookies_expired"
     if env.x_policy(config).hint_namespace == "official":
         if http.classify_failure(message=message) == health.PAYMENT_REQUIRED:
