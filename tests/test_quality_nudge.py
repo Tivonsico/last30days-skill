@@ -1050,3 +1050,57 @@ class TestXaiErrorRemediation:
         assert "x" in q["core_degraded"]
         assert expected_fix in q["nudge_text"]
         assert "log into x.com" not in q["nudge_text"]
+
+    def test_xai_rate_limit_does_not_skip_working_backup_on_later_x_subquery(self):
+        import last30days as cli
+        from lib import http, pipeline, providers, schema, xai_x, xquik
+
+        config = _base_config(XAI_API_KEY="dummy-xai-key", XQUIK_API_KEY="dummy-xquik-key")
+        runtime = schema.ProviderRuntime("local", "", "", "xai")
+        fallback_items = [
+            [{
+                "id": f"x{index}{slot}",
+                "text": f"Recent OpenClaw update {index} {slot}",
+                "url": f"https://x.com/example/status/12345678901234567{index}{slot}",
+                "author_handle": "",
+                "date": "2026-09-15",
+                "engagement": {"likes": 2},
+                "relevance": 0.9,
+            } for slot in range(3)]
+            for index in (0, 1, 2)
+        ]
+        with patch.object(providers, "resolve_runtime", return_value=(runtime, None)), \
+             patch.object(pipeline, "_inner_max_workers", return_value=1), \
+             patch.object(xai_x, "search_x", side_effect=http.HTTPError("Quota blocked", status_code=429)) as xai_search, \
+             patch.object(xquik, "search_xquik", return_value={"items": []}) as fallback_search, \
+             patch.object(xquik, "parse_xquik_response", side_effect=fallback_items):
+            report = pipeline.run(
+                topic="OpenClaw", config=config, depth="default", mock=False,
+                requested_sources=["x"], web_backend="none", as_of_date="2026-09-30",
+                external_plan={
+                    "intent": "breaking_news", "freshness_mode": "strict_recent",
+                    "cluster_mode": "story",
+                    "subqueries": [
+                        {
+                            "label": label, "search_query": f"OpenClaw {label}",
+                            "ranking_query": "OpenClaw", "sources": ["x"],
+                        }
+                        for label in ("first", "second")
+                    ],
+                },
+            )
+
+        assert xai_search.call_count >= 2
+        assert fallback_search.call_count >= 2
+        assert any(
+            "status/123456789012345671" in item.url
+            for item in report.items_by_source["x"]
+        )
+        assert report.source_status["x"].lane_failure_state == schema.RATE_LIMITED
+        research_results = cli._quality_research_results(
+            report, {"available_sources": ["x"]}, {"attempts": 0, "failures": 0}
+        )
+        assert "HTTP 429" in research_results["x_degraded_error"]
+        q = _compute(config_overrides=config, result_overrides=research_results, ytdlp_installed=True)
+        assert "x" in q["core_degraded"]
+        assert "rate limit" in q["nudge_text"]
