@@ -92,6 +92,16 @@ REGISTRY: Dict[Tuple[str, str], Prescription] = dict((
         anchor="api-keys-env",
     ),
     _entry(
+        "x", "xai_error",
+        cause="the xAI X search backend failed this run",
+        fix_nl=(
+            "check XAI_API_KEY and its chat/model permissions in console.x.ai, "
+            "confirm LAST30DAYS_X_MODEL names an available model, then re-run"
+        ),
+        fix_cli="XAI_API_KEY=<your-xai-key> LAST30DAYS_X_MODEL=<available-xai-model>",
+        anchor="api-keys-env",
+    ),
+    _entry(
         "x", "grok_cli_missing",
         cause="the Grok CLI is not installed, so the keyless X path is unavailable",
         fix_nl=(

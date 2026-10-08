@@ -63,16 +63,18 @@ def _has_x_credentials(config: dict) -> bool:
 def _x_error_prescription(config: dict, research_results: dict) -> prescriptions.Prescription:
     """The fix for a configured X that errored, routed through the X policy.
 
-    On an official-only host a credit-exhaustion error asks for a top-up
-    (``payment_required``) and every other error asks for a valid bearer or
-    the connector (``cookies_expired`` maps to ``bearer_invalid`` there);
-    elsewhere the entry is today's ``cookies_expired``.
+    The pipeline stamps the failed backend into ``x_error``. Use that runtime
+    provenance before the host policy, so an xAI failure does not ask for
+    browser cookies or an unrelated X API bearer.
     """
     message = str(research_results.get("x_error") or "")
     if message.startswith(x_envelope.DETAIL_NOT_PASSED):
         # The model declared the X connector lane and passed no envelope:
         # the fix is the connector, on any host.
         return prescriptions.for_x(config, "connector_missing")
+    backend_error = message.removeprefix("All X backends failed — ")
+    if backend_error.startswith("xai:"):
+        return prescriptions.for_x(config, "xai_error")
     failure = "cookies_expired"
     if env.x_policy(config).hint_namespace == "official":
         if http.classify_failure(message=message) == health.PAYMENT_REQUIRED:

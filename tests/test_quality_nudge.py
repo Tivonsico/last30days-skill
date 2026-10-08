@@ -819,3 +819,34 @@ class TestBearerCredential:
         )
         assert "top up" in q["nudge_text"].lower()
         assert "x.com" not in q["nudge_text"].lower()
+
+
+class TestXaiErrorRemediation:
+    """The selected API backend must not prescribe a browser-cookie login."""
+
+    @pytest.mark.parametrize("host", [None, "grok-bot"])
+    @pytest.mark.parametrize("message", [
+        "All X backends failed — xai: HTTP 403: Permission denied",
+        "xai: HTTP 401: Unauthorized",
+        "All X backends failed — xai: HTTP 404: Model not found",
+    ])
+    def test_runtime_xai_error_points_to_key_and_model_permissions(self, host, message):
+        q = _compute(
+            config_overrides={"XAI_API_KEY": "dummy-xai-key", "LAST30DAYS_HOST": host},
+            result_overrides={"x_error": message},
+            ytdlp_installed=True,
+        )
+        assert "XAI_API_KEY" in q["nudge_text"]
+        assert "LAST30DAYS_X_MODEL" in q["nudge_text"]
+        assert "console.x.ai" in q["nudge_text"]
+        assert "log into x.com" not in q["nudge_text"]
+        assert "X_BEARER_TOKEN" not in q["nudge_text"]
+
+    def test_runtime_bird_error_is_not_changed_by_a_fallback_xai_key(self):
+        q = _compute(
+            config_overrides={"AUTH_TOKEN": "dummy-cookie", "CT0": "dummy-ct0", "XAI_API_KEY": "dummy-xai-key"},
+            result_overrides={"x_error": "All X backends failed — bird: expired cookies"},
+            ytdlp_installed=True,
+        )
+        assert "log into x.com" in q["nudge_text"]
+        assert "console.x.ai" not in q["nudge_text"]
