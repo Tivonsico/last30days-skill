@@ -63,16 +63,17 @@ def _has_x_credentials(config: dict) -> bool:
 def _x_error_prescription(config: dict, research_results: dict) -> prescriptions.Prescription:
     """The fix for a configured X that errored, routed through the X policy.
 
-    The pipeline stamps the failed backend into ``x_error``. Use that runtime
-    provenance before the host policy, so an xAI failure does not ask for
-    browser cookies or an unrelated X API bearer.
+    The pipeline stamps the failed backend into ``x_error``, sometimes behind
+    a simplified-query retry label. Use that runtime provenance before the
+    host policy, so an xAI failure gets its own repair.
     """
     message = str(research_results.get("x_error") or "")
     if message.startswith(x_envelope.DETAIL_NOT_PASSED):
         # The model declared the X connector lane and passed no envelope:
         # the fix is the connector, on any host.
         return prescriptions.for_x(config, "connector_missing")
-    backend_error = message.removeprefix("All X backends failed — ")
+    backend_error = message.removeprefix("Simplified-query retry failed: ")
+    backend_error = backend_error.removeprefix("All X backends failed — ")
     if backend_error.startswith("xai:"):
         return prescriptions.for_x(config, "xai_error")
     failure = "cookies_expired"

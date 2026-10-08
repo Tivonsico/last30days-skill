@@ -6,6 +6,8 @@ trigger an authentication nudge.
 ScrapeCreators adds TikTok + Instagram as bonus sources, not core.
 """
 
+import threading
+
 import pytest
 from unittest.mock import patch
 
@@ -850,3 +852,44 @@ class TestXaiErrorRemediation:
         )
         assert "log into x.com" in q["nudge_text"]
         assert "console.x.ai" not in q["nudge_text"]
+
+    @pytest.mark.parametrize("backend,credentials,error,expected,unexpected", [
+        ("xai", {"XAI_API_KEY": "dummy-xai-key"}, "HTTP 403: Permission denied", "console.x.ai", "log into x.com"),
+        ("bird", {"AUTH_TOKEN": "dummy-cookie", "CT0": "dummy-ct0"}, "expired cookies", "log into x.com", "console.x.ai"),
+    ])
+    def test_thin_retry_failure_preserves_backend_repair(self, backend, credentials, error, expected, unexpected):
+        from lib import bird_x, pipeline, schema
+
+        config = _base_config(**credentials)
+        config["LAST30DAYS_X_BACKEND"] = backend
+        plan = schema.QueryPlan(
+            intent="breaking_news",
+            freshness_mode="strict_recent",
+            cluster_mode="story",
+            raw_topic="OpenClaw",
+            subqueries=[schema.SubQuery("primary", "OpenClaw", "Recent OpenClaw news", ["x"])],
+            source_weights={"x": 1.0},
+        )
+        bundle = schema.RetrievalBundle()
+        runtime = schema.ProviderRuntime("local", "", "", backend)
+
+        with patch.object(bird_x, "is_bird_installed", return_value=True), \
+             patch.object(pipeline, "_fetch_x_backend", return_value=([], error)):
+            pipeline._retry_thin_sources(
+                topic="OpenClaw",
+                bundle=bundle,
+                plan=plan,
+                config=config,
+                depth="default",
+                date_range=("2026-09-01", "2026-09-30"),
+                runtime=runtime,
+                mock=False,
+                rate_limited_sources=set(),
+                rate_limit_lock=threading.Lock(),
+                settings=pipeline.DEPTH_SETTINGS["default"],
+            )
+
+        assert bundle.errors_by_source["x"].startswith("Simplified-query retry failed: All X backends failed — ")
+        q = _compute(config_overrides=config, result_overrides={"x_error": bundle.errors_by_source["x"]}, ytdlp_installed=True)
+        assert expected in q["nudge_text"]
+        assert unexpected not in q["nudge_text"]
