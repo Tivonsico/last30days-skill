@@ -63,11 +63,11 @@ def _has_x_credentials(config: dict) -> bool:
 def _x_error_prescription(config: dict, research_results: dict) -> prescriptions.Prescription:
     """The fix for a configured X that errored, routed through the X policy.
 
-    The pipeline stamps the failed backend into ``x_error``, sometimes behind
-    a simplified-query retry label. Use that runtime provenance before the
-    host policy, so an xAI failure gets its own repair.
+    The pipeline stamps the failed backend into ``x_error`` or
+    ``x_degraded_error``, sometimes behind a simplified-query retry label.
+    Use that runtime provenance before the host policy.
     """
-    message = str(research_results.get("x_error") or "")
+    message = str(research_results.get("x_error") or research_results.get("x_degraded_error") or "")
     if message.startswith(x_envelope.DETAIL_NOT_PASSED):
         # The model declared the X connector lane and passed no envelope:
         # the fix is the connector, on any host.
@@ -209,7 +209,8 @@ def compute_quality_score(config: dict, research_results: dict) -> dict:
             degraded-YouTube detection (transcript-fetch ratio below threshold,
             or fallback/provider data returned without local yt-dlp).
             Optional key ``instagram_items_count`` enables silent-failure
-            detection for the bonus Instagram source.
+            detection for the bonus Instagram source. ``x_degraded_error``
+            carries a failed xAI lane when another backend served X items.
 
     Returns:
         {
@@ -242,6 +243,8 @@ def compute_quality_score(config: dict, research_results: dict) -> dict:
     )
     if _is_x_active(config, research_results):
         core_active.append("x")
+        if research_results.get("x_degraded_error"):
+            core_degraded.append("x")
     elif x_configured and research_results.get("x_error"):
         core_missing.append("x")
         core_errored.append("x")
@@ -286,7 +289,7 @@ def compute_quality_score(config: dict, research_results: dict) -> dict:
 
     has_sc = bool(config.get("SCRAPECREATORS_API_KEY"))
     active_sources = research_results.get("active_sources") or []
-    x_fix = _x_error_prescription(config, research_results) if "x" in core_errored else None
+    x_fix = _x_error_prescription(config, research_results) if "x" in core_errored or "x" in core_degraded else None
     nudge_text = _build_nudge_text(
         core_missing,
         core_errored,
@@ -365,6 +368,11 @@ def _build_nudge_text(
         if x_fix is None:
             x_fix = prescriptions.get("x", "cookies_expired")
         free_suggestions.append(f"X/Twitter errored - {x_fix.fix_nl}.")
+
+    if "x" in core_degraded:
+        if x_fix is None:
+            x_fix = prescriptions.get("x", "cookies_expired")
+        free_suggestions.append(f"X/Twitter used a backup - {x_fix.fix_nl}.")
 
     if "youtube" in core_missing:
         if "youtube" in core_errored:

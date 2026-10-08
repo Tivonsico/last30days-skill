@@ -3168,6 +3168,38 @@ def main() -> int:
     return _main(parser, args, extra_argv)
 
 
+def _quality_research_results(report, diag, yt_fetch_stats):
+    youtube_items = report.items_by_source.get("youtube") or []
+    instagram_items = report.items_by_source.get("instagram") or []
+    x_outcome = report.source_status.get("x")
+    x_degraded_error = None
+    if (
+        report.items_by_source.get("x")
+        and x_outcome is not None
+        and x_outcome.detail
+        and x_outcome.detail.startswith("X served via ")
+        and " after xai:" in x_outcome.detail
+    ):
+        x_degraded_error = x_outcome.detail
+    return {
+        "active_sources": diag.get("available_sources") or [],
+        "youtube_videos_count": len(youtube_items),
+        "youtube_transcripts_count": sum(
+            1 for it in youtube_items
+            if (it.metadata.get("transcript_highlights") or it.metadata.get("transcript_snippet"))
+        ),
+        "youtube_error": report.errors_by_source.get("youtube"),
+        "x_error": report.errors_by_source.get("x"),
+        "x_degraded_error": x_degraded_error,
+        "youtube_captions_disabled_count": sum(
+            1 for it in youtube_items if it.metadata.get("captions_disabled")
+        ),
+        "youtube_transcript_fetch_attempts": yt_fetch_stats["attempts"],
+        "youtube_transcript_fetch_failures": yt_fetch_stats["failures"],
+        "instagram_items_count": len(instagram_items),
+    }
+
+
 def _main(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
@@ -4280,40 +4312,9 @@ def _main(
         try:
             from lib import quality_nudge
             from lib import youtube_yt as _youtube_yt
-            # Populate transcript-fetch ratio so quality_nudge can detect the
-            # degraded-YouTube failure mode (videos returned but transcripts
-            # silently failed - typically a stale yt-dlp binary).
-            youtube_items = report.items_by_source.get("youtube") or []
-            _yt_fetch_stats = _youtube_yt.get_transcript_fetch_stats()
-            instagram_items = report.items_by_source.get("instagram") or []
-            research_results = {
-                "active_sources": diag.get("available_sources") or [],
-                "youtube_videos_count": len(youtube_items),
-                "youtube_transcripts_count": sum(
-                    1 for it in youtube_items
-                    if (it.metadata.get("transcript_highlights") or it.metadata.get("transcript_snippet"))
-                ),
-                "youtube_error": report.errors_by_source.get("youtube"),
-                "x_error": report.errors_by_source.get("x"),
-                # Captions-disabled videos can never produce a transcript regardless
-                # of yt-dlp version; subtract them from the degraded-ratio
-                # denominator so a single uploader-disabled video does not trip the
-                # "stale yt-dlp" nudge.
-                "youtube_captions_disabled_count": sum(
-                    1 for it in youtube_items if it.metadata.get("captions_disabled")
-                ),
-                # Actual yt-dlp fetch outcomes for this run. The counts above are
-                # computed from post-pruning items, so they can't tell "fetches
-                # failed (stale binary)" from "fetches succeeded but the videos
-                # were pruned downstream"; the latter was producing false
-                # stale-yt-dlp nudges (#531).
-                "youtube_transcript_fetch_attempts": _yt_fetch_stats["attempts"],
-                "youtube_transcript_fetch_failures": _yt_fetch_stats["failures"],
-                # Track Instagram returned-zero-items so quality_nudge can detect
-                # the silent-failure case (SC configured but the v2 reels endpoint
-                # 500'd through both the original query and the hashtag retry).
-                "instagram_items_count": len(instagram_items),
-            }
+            research_results = _quality_research_results(
+                report, diag, _youtube_yt.get_transcript_fetch_stats()
+            )
             quality = quality_nudge.compute_quality_score(config, research_results)
             if quality.get("nudge_text"):
                 sys.stderr.write(f"\n{quality['nudge_text']}\n")

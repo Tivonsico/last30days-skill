@@ -988,3 +988,65 @@ class TestXaiErrorRemediation:
         q = _compute(config_overrides=config, result_overrides={"x_error": bundle.errors_by_source["x"]}, ytdlp_installed=True)
         assert "console.x.ai" in q["nudge_text"]
         assert "log into x.com" not in q["nudge_text"]
+
+    @pytest.mark.parametrize("status,message,expected_state,expected_fix", [
+        (403, "Forbidden", "auth-failed", "console.x.ai"),
+        (402, "Quota blocked", "ok", "billing"),
+        (429, "Quota blocked", "ok", "rate limit"),
+        (None, "Request deadline exceeded", "ok", "timed out"),
+    ])
+    def test_xai_fallback_keeps_repair_in_final_report(self, status, message, expected_state, expected_fix):
+        import last30days as cli
+        from lib import http, pipeline, providers, render, schema, xai_x, xquik
+
+        config = _base_config(XAI_API_KEY="dummy-xai-key", XQUIK_API_KEY="dummy-xquik-key")
+        runtime = schema.ProviderRuntime("local", "", "", "xai")
+        fallback_item = {
+            "text": "Recent OpenClaw update",
+            "url": "https://x.com/example/status/1234567890123456789",
+            "author_handle": "example",
+            "date": "2026-09-15",
+            "engagement": {"likes": 2},
+            "relevance": 0.9,
+        }
+        error = http.DeadlineExceeded() if status is None else http.HTTPError(message, status_code=status)
+        with patch.object(providers, "resolve_runtime", return_value=(runtime, None)), \
+             patch.object(xai_x, "search_x", side_effect=error), \
+             patch.object(xquik, "search_xquik", return_value={"items": []}), \
+             patch.object(xquik, "parse_xquik_response", return_value=[fallback_item]):
+            report = pipeline.run(
+                topic="OpenClaw", config=config, depth="default", mock=False,
+                requested_sources=["x"], web_backend="none", as_of_date="2026-09-30",
+                external_plan={
+                    "intent": "breaking_news", "freshness_mode": "strict_recent",
+                    "cluster_mode": "story",
+                    "subqueries": [{
+                        "label": "primary", "search_query": "OpenClaw",
+                        "ranking_query": "OpenClaw", "sources": ["x"],
+                    }],
+                },
+            )
+
+        assert report.items_by_source["x"]
+        assert "x" not in report.errors_by_source
+        assert report.source_status["x"].state == expected_state
+        assert "xai:" in report.source_status["x"].detail
+        assert "re-login needed" not in report.source_status["x"].detail
+        rendered = render.render_compact(report)
+        if status == 403:
+            assert "xai: HTTP 403" in rendered
+        assert "re-login needed" not in rendered
+        research_results = cli._quality_research_results(
+            report, {"available_sources": ["x"]}, {"attempts": 0, "failures": 0}
+        )
+        assert research_results["x_error"] is None
+        assert research_results["x_degraded_error"].startswith("X served via xquik after xai:")
+        q = _compute(
+            config_overrides=config,
+            result_overrides=research_results,
+            ytdlp_installed=True,
+        )
+        assert "x" in q["core_active"]
+        assert "x" in q["core_degraded"]
+        assert expected_fix in q["nudge_text"]
+        assert "log into x.com" not in q["nudge_text"]

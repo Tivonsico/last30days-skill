@@ -5402,30 +5402,32 @@ def _retrieve_stream_impl(
                     )
                 # Check for auth errors before proceeding to judge-retry
                 if last_error:
-                    # Fallback succeeded after earlier backend failed. Classify
-                    # the original error: if it was AUTH_FAILED (grok revoked),
-                    # preserve that state so user gets re-login guidance.
+                    # Preserve a prior auth failure even when the backup served
+                    # items. Session backends alone need re-login guidance.
                     prior_state = last_state
                     if prior_state == schema.AUTH_FAILED:
-                        # Keep AUTH_FAILED visible so host shows re-login hint
+                        repair = (
+                            "; re-login needed for primary backend"
+                            if last_error.startswith(("grok:", "bird:")) else ""
+                        )
                         return items, _outcome_artifact(
                             schema.AUTH_FAILED,
-                            f"X served via {backend} after {last_error}; re-login needed for primary backend",
+                            f"X served via {backend} after {last_error}{repair}",
                         )
                     # Prior error was non-auth. Check if *current* backend also
                     # reported an error (e.g., grok returned items + revocation).
                     if err:
                         current_state = err_state
                         if current_state == schema.AUTH_FAILED:
+                            repair = "; re-login needed" if backend in ("grok", "bird") else ""
                             return items, _outcome_artifact(
                                 schema.AUTH_FAILED,
-                                f"X served {len(items)} items via {backend} but also errored: {err}; re-login needed",
+                                f"X served {len(items)} items via {backend} but also errored: {err}{repair}",
                             )
-                    # Non-auth prior error, no current auth error → fallback OK
-                    return items, _outcome_artifact(
-                        health.OK,
-                        f"X served via {backend} after {last_error}",
-                    )
+                    return items, {
+                        "_source_outcome_detail": f"X served via {backend} after {last_error}",
+                        "_source_outcome_detail_state": prior_state,
+                    }
                 if err:
                     # Mixed result: backend returned items BUT also hit an error
                     # (e.g., grok got some posts then auth was revoked mid-fanout).

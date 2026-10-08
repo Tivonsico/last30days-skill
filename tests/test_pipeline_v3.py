@@ -1140,9 +1140,9 @@ class TestMixedResultRevocation(unittest.TestCase):
                 date_range=("2026-05-19", "2026-06-18"), runtime=_make_runtime(None), mock=False,
             )
         self.assertEqual(1, len(items))
-        outcome = artifact.get("_source_outcome", {})
-        # Non-auth error followed by fallback success is OK
-        self.assertEqual("ok", outcome.get("state"))
+        self.assertNotIn("_source_outcome", artifact)
+        self.assertIn("grok: network timeout", artifact["_source_outcome_detail"])
+        self.assertEqual(health.TIMEOUT, artifact["_source_outcome_detail_state"])
 
     @patch("lib.env.x_backend_chain", return_value=["bird", "grok"])
     def test_prior_non_auth_then_current_auth_fail_yields_auth_failed(self, _chain):
