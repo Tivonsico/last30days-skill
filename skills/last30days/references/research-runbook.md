@@ -604,10 +604,13 @@ if [ ! -f "$SKILL_DIR/scripts/last30days.py" ]; then
   exit 1
 fi
 
-RESEARCH_TOPIC=$(cat <<'TOPIC_EOF'
+# Keep the quoted heredoc outside command substitution: macOS Bash 3.2
+# can misparse apostrophes/backticks in a heredoc nested inside $(...).
+IFS= read -r -d '' RESEARCH_TOPIC <<'TOPIC_EOF' || true
 {TOPIC}
 TOPIC_EOF
-)
+# read reaches EOF without a NUL delimiter; drop the heredoc's final newline.
+RESEARCH_TOPIC=${RESEARCH_TOPIC%$'\n'}
 "${LAST30DAYS_PYTHON}" "${SKILL_DIR}/scripts/last30days.py" "$RESEARCH_TOPIC" --emit=compact --save-dir="${LAST30DAYS_MEMORY_DIR}" --save-suffix=v3
 ```
 
