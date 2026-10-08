@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -13,11 +14,14 @@ import last30days as cli
 from tests.skill_contract import reference_text
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
 @pytest.mark.parametrize("ambient_arguments", [None, "WRONG TOPIC --emit=json --save-dir=/wrong"])
 @pytest.mark.parametrize("saving_enabled", [False, True])
 def test_raw_research_recipe_preserves_the_topic_without_host_argument_expansion(
-    tmp_path, ambient_arguments, saving_enabled,
+    tmp_path, ambient_arguments, saving_enabled, shell,
 ):
+    if not shutil.which(shell, path=os.defpath):
+        pytest.skip(f"{shell} is not installed")
     reference = reference_text("research-runbook")
     commands = [
         block for block in re.findall(r"```bash\n(.*?)\n```", reference, re.S)
@@ -52,7 +56,7 @@ def test_raw_research_recipe_preserves_the_topic_without_host_argument_expansion
     if ambient_arguments is not None:
         env["ARGUMENTS"] = ambient_arguments
     result = subprocess.run(
-        ["bash", "-euC", "-c", command], cwd=tmp_path, env=env,
+        [shell, "-euC", "-c", command], cwd=tmp_path, env=env,
         text=True, capture_output=True, timeout=15,
     )
 
