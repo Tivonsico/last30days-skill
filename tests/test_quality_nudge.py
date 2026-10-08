@@ -1069,8 +1069,17 @@ class TestXaiErrorRemediation:
             } for slot in range(3)]
             for index in (0, 1, 2)
         ]
+        second_query_items = []
+        add_items = schema.RetrievalBundle.add_items
+
+        def capture_items(bundle, label, source, items):
+            if label == "second" and source == "x":
+                second_query_items.extend(items)
+            return add_items(bundle, label, source, items)
+
         with patch.object(providers, "resolve_runtime", return_value=(runtime, None)), \
              patch.object(pipeline, "_inner_max_workers", return_value=1), \
+             patch.object(schema.RetrievalBundle, "add_items", new=capture_items), \
              patch.object(xai_x, "search_x", side_effect=http.HTTPError("Quota blocked", status_code=429)) as xai_search, \
              patch.object(xquik, "search_xquik", return_value={"items": []}) as fallback_search, \
              patch.object(xquik, "parse_xquik_response", side_effect=fallback_items):
@@ -1094,7 +1103,7 @@ class TestXaiErrorRemediation:
         assert fallback_search.call_count >= 2
         assert any(
             "status/123456789012345671" in item.url
-            for item in report.items_by_source["x"]
+            for item in second_query_items
         )
         assert report.source_status["x"].lane_failure_state == schema.RATE_LIMITED
         research_results = cli._quality_research_results(
@@ -1103,4 +1112,57 @@ class TestXaiErrorRemediation:
         assert "HTTP 429" in research_results["x_degraded_error"]
         q = _compute(config_overrides=config, result_overrides=research_results, ytdlp_installed=True)
         assert "x" in q["core_degraded"]
+        assert "rate limit" in q["nudge_text"]
+
+    def test_rate_limited_backup_stops_later_x_subqueries(self):
+        import last30days as cli
+        from lib import http, pipeline, providers, schema, xai_x, xquik
+
+        config = _base_config(XAI_API_KEY="dummy-xai-key", XQUIK_API_KEY="dummy-xquik-key")
+        runtime = schema.ProviderRuntime("local", "", "", "xai")
+        topic = "OpenClaw launch update"
+        assert len(xquik.expand_xquik_queries(topic, "default")) == 2
+        get_calls = 0
+
+        def partial_xquik_response(*args, **kwargs):
+            nonlocal get_calls
+            get_calls += 1
+            if get_calls == 1:
+                return {"tweets": [{
+                    "id": "1234567890123456789",
+                    "author": {"username": "example"},
+                    "createdAt": "2026-09-15T12:00:00Z",
+                    "text": "Recent OpenClaw update",
+                }]}
+            http._raise(http.HTTPError("Too many requests", status_code=429))
+
+        with patch.object(providers, "resolve_runtime", return_value=(runtime, None)), \
+             patch.object(pipeline, "_inner_max_workers", return_value=1), \
+             patch.object(xai_x, "search_x", side_effect=http.HTTPError("Quota blocked", status_code=429)) as xai_search, \
+             patch.object(xquik, "search_xquik", wraps=xquik.search_xquik) as fallback_search, \
+             patch.object(http, "get", side_effect=partial_xquik_response):
+            report = pipeline.run(
+                topic=topic, config=config, depth="default", mock=False,
+                requested_sources=["x"], web_backend="none", as_of_date="2026-09-30",
+                external_plan={
+                    "intent": "breaking_news", "freshness_mode": "strict_recent",
+                    "cluster_mode": "story",
+                    "subqueries": [
+                        {
+                            "label": label, "search_query": f"OpenClaw {label}",
+                            "ranking_query": "OpenClaw", "sources": ["x"],
+                        }
+                        for label in ("first", "second")
+                    ],
+                },
+            )
+
+        assert xai_search.call_count == 1
+        assert fallback_search.call_count == 1
+        assert report.items_by_source["x"]
+        assert report.source_status["x"].lane_failure_state == schema.RATE_LIMITED
+        results = cli._quality_research_results(
+            report, {"available_sources": ["x"]}, {"attempts": 0, "failures": 0}
+        )
+        q = _compute(config_overrides=config, result_overrides=results, ytdlp_installed=True)
         assert "rate limit" in q["nudge_text"]

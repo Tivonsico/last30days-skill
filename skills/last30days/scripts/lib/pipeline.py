@@ -2804,7 +2804,7 @@ def run(
                     with rate_limit_lock:
                         rate_limited_sources.add(source)
             if isinstance(artifact, dict):
-                artifact.pop("_x_fallback_served", None)
+                artifact.pop("_x_backup_not_rate_limited", None)
             normalized = _normalize_score_dedupe(
                 source, raw_items, from_date, to_date,
                 freshness_mode=plan.freshness_mode,
@@ -4973,7 +4973,7 @@ def _merge_reddit_items(free: list[dict], sc: list[dict]) -> list[dict]:
 def _detail_rate_limits_source(source: str, artifact: dict) -> bool:
     if artifact.get("_source_outcome_detail_state") != health.RATE_LIMITED:
         return False
-    return source != "x" or not bool(artifact.get("_x_fallback_served"))
+    return source != "x" or not bool(artifact.get("_x_backup_not_rate_limited"))
 
 
 def _retrieve_stream(*args, **kwargs) -> tuple[list[dict], dict]:
@@ -5446,10 +5446,11 @@ def _retrieve_stream_impl(
                 chain_errors.append((msg, last_state))
                 print("[X] chain budget exhausted; skipping remaining backends", file=sys.stderr)
                 break
-            items, err, err_state = _attempt_x_backend(
-                backend, x_query, from_date, to_date, depth, config, warnings=x_warnings,
-                deadline=chain_deadline,
-            )
+            with http.tee_failures() as backend_failures:
+                items, err, err_state = _attempt_x_backend(
+                    backend, x_query, from_date, to_date, depth, config, warnings=x_warnings,
+                    deadline=chain_deadline,
+                )
             if items:
                 if i > 0:
                     # xapi is metered: name the spend when it served as a backup.
@@ -5482,10 +5483,18 @@ def _retrieve_stream_impl(
                                 schema.AUTH_FAILED,
                                 f"X served {len(items)} items via {backend} but also errored: {err}{repair}",
                             )
+                    backup_rate_limited = err_state == health.RATE_LIMITED or any(
+                        failure.outcome_state == health.RATE_LIMITED for failure in backend_failures
+                    )
+                    detail = f"X served via {backend} after {last_error}"
+                    if err:
+                        detail += f"; {backend}: {err}"
+                    elif backup_rate_limited:
+                        detail += f"; {backend} also rate-limited"
                     return items, {
-                        "_source_outcome_detail": f"X served via {backend} after {last_error}",
-                        "_source_outcome_detail_state": prior_state,
-                        "_x_fallback_served": True,
+                        "_source_outcome_detail": detail,
+                        "_source_outcome_detail_state": health.RATE_LIMITED if backup_rate_limited else prior_state,
+                        "_x_backup_not_rate_limited": not backup_rate_limited,
                     }
                 if err:
                     # Mixed result: backend returned items BUT also hit an error
